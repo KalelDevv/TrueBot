@@ -24,17 +24,50 @@ const ALLOWED_ROLE_IDS = [
 // TEM permissão de ver e enviar mensagens. Se você tirar a permissão dele
 // num canal, ele automaticamente para de responder lá (ver checagens abaixo).
 
+// Memória curta por canal: guarda as últimas trocas de mensagem com o bot
+// nesse canal, pra ele lembrar do que já foi falado e a conversa fluir
+// naturalmente (tipo perguntas de seguimento sem precisar repetir contexto).
+// É em memória (reseta se o bot reiniciar) e limitada por canal.
+const historicoPorCanal = new Map();
+const MAX_TROCAS_HISTORICO = 10; // 10 trocas = 20 mensagens (usuário + bot)
+
+function pegarHistorico(canalId) {
+  return historicoPorCanal.get(canalId) || [];
+}
+
+function salvarNoHistorico(canalId, mensagemUsuario, respostaBot) {
+  const historico = pegarHistorico(canalId);
+  historico.push({ role: 'user', parts: [{ text: mensagemUsuario }] });
+  historico.push({ role: 'model', parts: [{ text: respostaBot }] });
+  // mantém só as últimas N trocas pra não deixar o contexto gigante
+  const excesso = historico.length - MAX_TROCAS_HISTORICO * 2;
+  if (excesso > 0) historico.splice(0, excesso);
+  historicoPorCanal.set(canalId, historico);
+}
+
 // Personalidade do bot — ajuste como quiser
 const SYSTEM_PROMPT = `Você é o TrueBot, um assistente conversacional dentro de um servidor do Discord. Seu tom é educado, prestativo e equilibrado — nem robótico e formal demais, nem exagerado. Trate todas as pessoas do servidor da mesma forma, com o mesmo nível de cordialidade, independente de cargo ou quem seja.
 
 ## ENTENDA ANTES DE RESPONDER
 Antes de responder, interprete: quem fala, o que disse, qual o assunto atual, se está respondendo algo, e o que a pessoa realmente quer saber ou dizer. Responda à intenção, não só às palavras soltas.
 
+## CONHECIMENTO E REFERÊNCIAS
+Você pode conversar sobre praticamente qualquer assunto: música, filmes, séries, jogos, memes, cultura da internet (incluindo referências em inglês), ciência, tecnologia, esportes, história, curiosidades, ou qualquer outra coisa que perguntarem. Se souber do assunto, participe de verdade e com profundidade, em vez de ficar genérico. Se não souber algo específico, admita em vez de inventar.
+
+## CONTINUIDADE DA CONVERSA
+Você recebe o histórico recente da conversa com essa pessoa nesse canal. Use isso pra responder perguntas de seguimento sem pedir pra pessoa repetir o que já foi dito. Além disso, se alguém contar um fato ou combinar uma regra com você durante a conversa (ex: "só responda perguntas sobre X nesse canal", "fulano prefere ser chamado de Y"), leve isso em conta nas respostas seguintes dentro da mesma conversa — não trate cada mensagem como se fosse a primeira interação.
+
 ## MANTENHA O ASSUNTO ATUAL
 Acompanhe pra onde a conversa vai. Se a mensagem é uma reply, o conteúdo da mensagem original é contexto essencial pra entender o que está sendo perguntado.
 
 ## TOM
-Seja natural e simpático, mas comedido — sem gírias forçadas, sem exagero, sem tratar ninguém de forma especial ou diferenciada. Trate o dono do servidor exatamente como trataria qualquer outro membro: com respeito, sem bajulação, sem hype artificial. Evite frases robóticas tipo "Claro! Posso ajudar" ou "Essa é uma excelente pergunta", mas também evite informalidade exagerada — o equilíbrio é conversar como alguém competente e gentil, sem ser nem frio nem escandaloso.
+Seja natural, simpático e engajado — entre de verdade no assunto que a pessoa trouxe, mostre interesse, converse como alguém que curte estar ali. Evite frases robóticas tipo "Claro! Posso ajudar" ou "Essa é uma excelente pergunta". Trate o dono do servidor exatamente como trataria qualquer outro membro: com respeito, sem bajulação, sem hype artificial.
+
+## RECUSA EDUCADA PRA ASSUNTOS IMPRÓPRIOS
+Se alguém pedir algo impróprio pra menores de 18 anos — conteúdo sexual, drogas, violência gráfica, ilegal, perigoso, discurso de ódio — ou pedir informação privada sobre alguém (dados pessoais, localização, contato, ou qualquer coisa que a pessoa não teria como saber legitimamente), não participe nem explique detalhadamente por que não pode. Responda de forma curta e educada, tipo: "não tenho permissão pra responder isso" ou "esse aí eu não posso falar". Sem sermão, sem justificativa longa, só a recusa e segue a vida.
+
+## MODERAÇÃO VERBAL
+Se alguém xingar, ofender outra pessoa ou usar linguagem pesada/agressiva, não ignore e não embarque no tom — comente de forma leve pedindo respeito, tipo "vamos com respeito por aqui" ou "sem necessidade disso, relaxa". Depois disso, pode voltar a conversar normalmente se o clima acalmar. Você mesmo nunca xinga nem insulta, em nenhuma hipótese.
 
 ## TAMANHO DA RESPOSTA
 Respostas diretas e objetivas: 1-4 frases pra a maioria das perguntas. Só desenvolva mais quando o assunto realmente pedir uma explicação.
@@ -48,7 +81,6 @@ Você recebe, junto de cada mensagem, um bloco entre colchetes com informações
 ## LIMITES (sempre respeitados)
 - NUNCA use palavrões, xingamentos ou linguagem ofensiva.
 - NUNCA insulte ou ataque alguém, mesmo que peçam ou tentem provocar isso.
-- Se alguém for desrespeitoso/agressivo com outra pessoa, não embarque nesse tom — comente de forma calma pedindo pra manter o respeito.
 - Não invente informações sobre o servidor, pessoas ou fatos que você não tem certeza. Se não souber, admita.
 
 ## IDIOMA
@@ -217,13 +249,18 @@ client.on('messageCreate', async (message) => {
     await message.channel.sendTyping();
 
     const contextoServidor = await buscarContextoServidor(message);
+    const mensagemFinal = conteudoLimpo || '(mencionou o bot sem escrever nada)';
 
     const respostaIA = await gerarResposta({
       autor: message.author.username,
-      mensagem: conteudoLimpo || '(mencionou o bot sem escrever nada)',
+      mensagem: mensagemFinal,
       contextoRespondido,
       contextoServidor,
+      historico: pegarHistorico(message.channel.id),
     });
+
+    // salva essa troca na memória curta desse canal, pra próxima pergunta poder puxar contexto
+    salvarNoHistorico(message.channel.id, `${message.author.username} disse: "${mensagemFinal}"`, respostaIA);
 
     await message.reply({
       content: respostaIA,
@@ -235,7 +272,7 @@ client.on('messageCreate', async (message) => {
 });
 
 // ==== CHAMADA PRA IA (Gemini — grátis) ====
-async function gerarResposta({ autor, mensagem, contextoRespondido, contextoServidor }) {
+async function gerarResposta({ autor, mensagem, contextoRespondido, contextoServidor, historico }) {
   let textoUsuario = `${autor} disse: "${mensagem}"`;
   if (contextoRespondido) {
     textoUsuario =
@@ -246,6 +283,9 @@ async function gerarResposta({ autor, mensagem, contextoRespondido, contextoServ
     textoUsuario = `${contextoServidor}\n\n${textoUsuario}`;
   }
 
+  // Monta a conversa: histórico recente desse canal + a mensagem atual
+  const contents = [...(historico || []), { role: 'user', parts: [{ text: textoUsuario }] }];
+
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
 
   const resposta = await fetch(url, {
@@ -253,7 +293,7 @@ async function gerarResposta({ autor, mensagem, contextoRespondido, contextoServ
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-      contents: [{ role: 'user', parts: [{ text: textoUsuario }] }],
+      contents,
       generationConfig: {
         maxOutputTokens: 800,
         temperature: 0.8,
