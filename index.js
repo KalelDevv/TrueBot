@@ -1,11 +1,3 @@
-#!/bin/bash
-set -e
-cd ~/Downloads/TrueBot_novo
-
-# Apaga o index.js antigo por completo antes de recriar (evita duplicacao)
-rm -f index.js
-
-cat > index.js << 'TRUEBOT_EOF_INDEX_MARKER'
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, PermissionsBitField } = require('discord.js');
 
@@ -331,12 +323,3 @@ async function gerarResposta({ autor, mensagem, contextoRespondido, contextoServ
 }
 
 client.login(DISCORD_TOKEN);
-TRUEBOT_EOF_INDEX_MARKER
-
-echo "--- index.js recriado, verificando sintaxe ---"
-node --check index.js && echo "SINTAXE OK"
-
-echo "--- mandando pro GitHub ---"
-git add -A
-git commit -m "prompt completo: identidade de membro real, variacao, seguranca contra manipulacao"
-git push
