@@ -24,6 +24,9 @@ const ALLOWED_ROLE_IDS = [
 // TEM permissão de ver e enviar mensagens. Se você tirar a permissão dele
 // num canal, ele automaticamente para de responder lá (ver checagens abaixo).
 
+// Quantos canais no máximo ela varre numa busca (proteção pra servidores com MUITOS canais)
+const MAX_CANAIS_BUSCA = 40;
+
 // Memória curta por canal: guarda as últimas trocas de mensagem com o bot
 // nesse canal, pra ele lembrar do que já foi falado e a conversa fluir
 // naturalmente (tipo perguntas de seguimento sem precisar repetir contexto).
@@ -47,11 +50,13 @@ function salvarNoHistorico(canalId, mensagemUsuario, respostaBot) {
 
 // Personalidade do bot — enxuta de propósito: poucas regras fixas,
 // o resto é conversa natural mesmo. Ajuste como quiser.
-const SYSTEM_PROMPT = `Você é a TrueBot, uma presença natural da comunidade desse servidor do Discord — não um robô de suporte nem uma enciclopédia. Você é do gênero feminino e fala de si mesma nesse gênero naturalmente. Não force gírias masculinas tipo "cara", "mano", "meu trampo" — fale do seu jeito, sem imitar um tom que não é seu.
+const SYSTEM_PROMPT = `Você é a TrueBot, uma presença natural da comunidade desse servidor do Discord — não um robô de suporte nem uma enciclopédia. Você é do gênero feminino e fala de si mesma nesse gênero naturalmente. Seu tom é doce e calmo — não force gírias masculinas tipo "cara", "mano", "meu trampo", e não exagere em "KKKKKK" repetido sem parar; uma risada natural de vez em quando basta, sem virar escândalo toda hora.
 
-Responda de forma direta e informativa primeiro — vá direto à pergunta ou ao ponto, tipo a Dyna faz: clara, útil, sem enrolar antes de chegar na resposta. Depois disso, pode ter um toque de calor humano se fizer sentido, mas a prioridade é responder bem.
+Responda de forma direta e informativa primeiro — vá direto à pergunta ou ao ponto, tipo a Dyna faz: clara, útil, sem enrolar antes de chegar na resposta. Depois disso, pode ter um toque de calor se fizer sentido, mas a prioridade é responder bem e ficar no assunto que a pessoa trouxe — não puxe pra outro assunto nem ignore o que foi perguntado.
 
-Você SEMPRE recebe, junto de cada mensagem, um bloco entre colchetes com informações reais e atualizadas do servidor (dono, cargos existentes e quem tem cada um). Essa lista está sempre disponível pra você nessa mensagem — nunca diga que "não está carregando" ou que não tem acesso a ela; ela sempre vem junto. Use isso pra responder com precisão sobre cargos, staff e quem tem o quê. Se alguém perguntar como consegue um cargo específico ou disser que quer um cargo, entenda o pedido e responda com base nessa lista real, sem chutar requisito que não foi informado.
+Adapte o registro ao clima da conversa: se o assunto for sério ou alguém estiver pedindo uma informação prática, seja mais formal e objetiva. Se o clima for descontraído, pode acompanhar com uma informalidade leve e natural (inclusive do jeito que a galera de fora fala — tipo alongar uma palavra "righttt", "ateeee", "arrasou" — mas só quando o contexto realmente pedir isso, não em toda frase).
+
+Você SEMPRE recebe, junto de cada mensagem, um bloco entre colchetes com informações reais e atualizadas do servidor (dono, cargos existentes e quem tem cada um). Além disso, sempre que a pergunta parecer precisar de uma informação específica do servidor, o sistema já varre TODOS os canais que você consegue ver em busca de trechos relacionados, e anexa isso na mensagem também — então você tem acesso dinâmico a qualquer canal onde a informação estiver documentada, sem depender de configuração prévia. Nunca diga que "não está carregando" ou que não tem acesso — se a informação não aparecer no bloco de contexto, é porque ela não foi encontrada em nenhum canal acessível, e nesse caso admita que não sabe ou sugira perguntar a alguém da staff, em vez de inventar. Use as informações fornecidas com precisão pra responder sobre cargos, staff, requisitos e funções, sem chutar requisito que não foi informado.
 
 Responda sempre no mesmo idioma que a pessoa usou pra falar com você. Converse livremente sobre qualquer assunto — cultura, jogos, música, o que surgir — com conhecimento de verdade. Varie o tamanho da resposta conforme a situação: às vezes uma reação curta já basta, às vezes vale desenvolver mais.
 
@@ -125,9 +130,84 @@ async function buscarMembrosPorCargo(guild) {
   }
 }
 
+// Cache do conteúdo de CADA canal (não só uma lista fixa) — assim ela pode
+// procurar em qualquer canal que tenha permissão de ver, sem precisar configurar
+// nada. Atualiza por canal a cada 10 minutos, então cargo/info nova criada por
+// você já aparece pra ela na próxima vez que alguém perguntar (depois desse cache expirar).
+const cacheConteudoCanais = new Map(); // canalId -> { timestamp, mensagens: string[] }
+const DURACAO_CACHE_CANAIS_MS = 10 * 60 * 1000;
+
+async function buscarConteudoCanal(canal) {
+  const cacheAtual = cacheConteudoCanais.get(canal.id);
+  if (cacheAtual && Date.now() - cacheAtual.timestamp < DURACAO_CACHE_CANAIS_MS) {
+    return cacheAtual.mensagens;
+  }
+  try {
+    const mensagens = await canal.messages.fetch({ limit: 50 });
+    const textos = mensagens
+      .filter((m) => m.content && m.content.trim().length > 5)
+      .map((m) => m.content.trim());
+    cacheConteudoCanais.set(canal.id, { timestamp: Date.now(), mensagens: textos });
+    return textos;
+  } catch (e) {
+    return [];
+  }
+}
+
+// Varre TODOS os canais de texto que a bot tem permissão de ver e ler histórico,
+// procurando trechos relacionados à pergunta atual (por palavra-chave). Isso é o
+// que permite ela responder sobre cargo/regra/info nova sem precisar configurar
+// canal nenhum antes — se a informação existir em algum canal que ela enxerga,
+// ela acha. Se não achar nada, retorna vazio (e ela deve admitir que não sabe).
+async function buscarNoServidorTodo(guild, pergunta) {
+  const botMember = guild.members.me;
+  if (!botMember || !pergunta) return '';
+
+  // extrai palavras-chave relevantes da pergunta (ignora palavras muito curtas/comuns)
+  const palavrasIgnoradas = new Set([
+    'para', 'como', 'quero', 'você', 'voce', 'isso', 'aqui', 'esse', 'essa',
+    'está', 'esta', 'tem', 'que', 'com', 'uma', 'um', 'the', 'and', 'what',
+    'how', 'is', 'do', 'you', 'this', 'that',
+  ]);
+  const palavrasChave = pergunta
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .filter((p) => p.length > 3 && !palavrasIgnoradas.has(p));
+
+  if (palavrasChave.length === 0) return '';
+
+  const canaisAcessiveis = guild.channels.cache
+    .filter((canal) => {
+      if (!canal.isTextBased || !canal.isTextBased()) return false;
+      const perms = canal.permissionsFor(botMember);
+      return (
+        perms?.has(PermissionsBitField.Flags.ViewChannel) &&
+        perms?.has(PermissionsBitField.Flags.ReadMessageHistory)
+      );
+    })
+    .first(MAX_CANAIS_BUSCA);
+
+  const resultados = [];
+  for (const canal of canaisAcessiveis) {
+    const textos = await buscarConteudoCanal(canal);
+    for (const texto of textos) {
+      const textoLower = texto.toLowerCase();
+      if (palavrasChave.some((p) => textoLower.includes(p))) {
+        resultados.push(`#${canal.name}: ${texto}`);
+      }
+    }
+    if (resultados.length >= 20) break; // já achou o suficiente, não precisa continuar
+  }
+
+  if (resultados.length === 0) return '';
+  return `Trechos encontrados em canais do servidor relacionados à pergunta:\n${resultados.slice(0, 20).join('\n').slice(0, 4000)}`;
+}
+
+
 // Busca informações reais do servidor: dono, quem tem cada cargo, e cargos de quem
 // foi mencionado na mensagem. Isso evita que o bot "invente" quem é staff/dono.
-async function buscarContextoServidor(message) {
+async function buscarContextoServidor(message, pergunta) {
   const guild = message.guild;
   if (!guild) return '';
 
@@ -144,6 +224,7 @@ async function buscarContextoServidor(message) {
   }
 
   const infoCargos = await buscarMembrosPorCargo(guild);
+  const infoCanais = await buscarNoServidorTodo(guild, pergunta);
 
   let infoMencionados = '';
   if (message.mentions.members?.size > 0) {
@@ -162,7 +243,9 @@ async function buscarContextoServidor(message) {
     }
   }
 
-  return `[Informações reais do servidor "${guild.name}": o dono é ${nomeDono}. ${infoCargos}.${infoMencionados} Use essas informações se a pergunta for sobre quem é dono, staff ou quem tem determinado cargo — nunca invente isso.]`;
+  const blocoCanaisInfo = infoCanais ? `\n\n${infoCanais}` : '';
+
+  return `[Informações reais do servidor "${guild.name}": o dono é ${nomeDono}. ${infoCargos}.${infoMencionados} Use essas informações se a pergunta for sobre quem é dono, staff ou quem tem determinado cargo — nunca invente isso.${blocoCanaisInfo}]`;
 }
 
 client.once('clientReady', () => {
@@ -223,8 +306,8 @@ client.on('messageCreate', async (message) => {
 
     await message.channel.sendTyping();
 
-    const contextoServidor = await buscarContextoServidor(message);
     const mensagemFinal = conteudoLimpo || '(mencionou o bot sem escrever nada)';
+    const contextoServidor = await buscarContextoServidor(message, mensagemFinal);
 
     const respostaIA = await gerarResposta({
       autor: message.author.username,
