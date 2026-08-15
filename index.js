@@ -1,11 +1,3 @@
-#!/bin/bash
-set -e
-cd ~/Downloads/TrueBot_novo
-
-# Apaga o index.js antigo por completo antes de recriar (evita duplicação)
-rm -f index.js
-
-cat > index.js << 'TRUEBOT_EOF_INDEX'
 require('dotenv').config();
 const { Client, GatewayIntentBits, Partials, PermissionsBitField } = require('discord.js');
 
@@ -18,6 +10,8 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-flash-lite-latest';
 const GUILD_ID = process.env.GUILD_ID || '';
 
 // Cargos que têm permissão de fazer o bot responder.
+// Preenchemos 5 variáveis (ALLOWED_ROLE_ID_1 a 5) pra você ir adicionando cargos no futuro
+// direto pelas variáveis de ambiente do Railway, sem precisar mexer no código.
 const ALLOWED_ROLE_IDS = [
   process.env.ALLOWED_ROLE_ID_1,
   process.env.ALLOWED_ROLE_ID_2,
@@ -331,12 +325,3 @@ async function gerarResposta({ autor, mensagem, contextoRespondido, contextoServ
 }
 
 client.login(DISCORD_TOKEN);
-TRUEBOT_EOF_INDEX
-
-echo "--- index.js recriado, verificando sintaxe ---"
-node --check index.js && echo "SINTAXE OK"
-
-echo "--- mandando pro GitHub ---"
-git add -A
-git commit -m "corrige duplicacao do index.js"
-git push
