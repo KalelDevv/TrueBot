@@ -68,10 +68,57 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel],
 });
 
-// Cache simples pra não ficar buscando o dono do servidor toda hora (ele quase nunca muda)
+// Cache pra não ficar buscando dono/membros toda hora — atualiza a cada 5 minutos
 const cacheDonoServidor = new Map();
+const cacheCargosServidor = new Map();
+const DURACAO_CACHE_MS = 5 * 60 * 1000;
 
-// Busca informações reais do servidor: dono, cargos existentes, e cargos de quem
+// Busca quem tem cada cargo no servidor (não só o nome do cargo).
+// Isso permite responder "quem é Head of Staff?" com dado real, não chute.
+async function buscarMembrosPorCargo(guild) {
+  const cacheAtual = cacheCargosServidor.get(guild.id);
+  if (cacheAtual && Date.now() - cacheAtual.timestamp < DURACAO_CACHE_MS) {
+    return cacheAtual.texto;
+  }
+
+  // Servidores muito grandes (5000+ membros) demoram demais e pesam pra buscar
+  // todo mundo — nesse caso só listamos os nomes dos cargos, sem os membros.
+  if (guild.memberCount > 5000) {
+    const cargos = guild.roles.cache
+      .filter((c) => c.name !== '@everyone')
+      .sort((a, b) => b.position - a.position)
+      .map((c) => c.name)
+      .slice(0, 25)
+      .join(', ');
+    const texto = `Cargos existentes: ${cargos} (servidor grande demais pra listar quem tem cada cargo automaticamente).`;
+    cacheCargosServidor.set(guild.id, { timestamp: Date.now(), texto });
+    return texto;
+  }
+
+  try {
+    await guild.members.fetch(); // garante que o cache de membros está completo
+
+    const linhas = guild.roles.cache
+      .filter((cargo) => cargo.name !== '@everyone' && cargo.members.size > 0)
+      .sort((a, b) => b.position - a.position)
+      .slice(0, 30)
+      .map((cargo) => {
+        const nomes = cargo.members.map((m) => m.displayName).slice(0, 15);
+        const sobrando = cargo.members.size - nomes.length;
+        const listaNomes = sobrando > 0 ? `${nomes.join(', ')} (+${sobrando})` : nomes.join(', ');
+        return `${cargo.name}: ${listaNomes}`;
+      });
+
+    const texto = `Cargos e quem tem cada um: ${linhas.join(' | ')}`;
+    cacheCargosServidor.set(guild.id, { timestamp: Date.now(), texto });
+    return texto;
+  } catch (e) {
+    console.warn('Não consegui buscar membros por cargo:', e.message);
+    return 'Não foi possível carregar os cargos agora.';
+  }
+}
+
+// Busca informações reais do servidor: dono, quem tem cada cargo, e cargos de quem
 // foi mencionado na mensagem. Isso evita que o bot "invente" quem é staff/dono.
 async function buscarContextoServidor(message) {
   const guild = message.guild;
@@ -89,12 +136,7 @@ async function buscarContextoServidor(message) {
     }
   }
 
-  const cargos = guild.roles.cache
-    .filter((cargo) => cargo.name !== '@everyone')
-    .sort((a, b) => b.position - a.position)
-    .map((cargo) => cargo.name)
-    .slice(0, 25)
-    .join(', ');
+  const infoCargos = await buscarMembrosPorCargo(guild);
 
   let infoMencionados = '';
   if (message.mentions.members?.size > 0) {
@@ -113,7 +155,7 @@ async function buscarContextoServidor(message) {
     }
   }
 
-  return `[Informações reais do servidor "${guild.name}": o dono é ${nomeDono}. Cargos que existem no servidor: ${cargos}.${infoMencionados} Use essas informações se a pergunta for sobre quem é dono, staff ou cargos — nunca invente isso.]`;
+  return `[Informações reais do servidor "${guild.name}": o dono é ${nomeDono}. ${infoCargos}.${infoMencionados} Use essas informações se a pergunta for sobre quem é dono, staff ou quem tem determinado cargo — nunca invente isso.]`;
 }
 
 client.once('clientReady', () => {
