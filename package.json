@@ -1,0 +1,17 @@
+{
+  "name": "truebot",
+  "version": "1.0.0",
+  "description": "TrueBot - Bot de Discord com respostas por IA (Gemini, gratuito)",
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5"
+  }
+}
